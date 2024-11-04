@@ -1,10 +1,8 @@
 import { Value } from "@sinclair/typebox/value";
 import Decimal from "decimal.js";
 import { encodingForModel } from "js-tiktoken";
-import OpenAI from "openai";
 import { commentEnum, CommentKind, CommentType } from "../configuration/comment-types";
 import configuration from "../configuration/config-reader";
-import { OPENAI_API_KEY } from "../configuration/constants";
 import {
   ContentEvaluatorConfiguration,
   contentEvaluatorConfigurationType,
@@ -25,10 +23,10 @@ import { GithubCommentScore, Module, Result } from "./processor";
  */
 export class ContentEvaluatorModule implements Module {
   readonly _configuration: ContentEvaluatorConfiguration | null = configuration.incentives.contentEvaluator;
-  readonly _openAi = new OpenAI({
-    apiKey: OPENAI_API_KEY,
-    ...(this._configuration?.openAi.endpoint && { baseURL: this._configuration.openAi.endpoint }),
-  });
+  // readonly _openAi = new OpenAI({
+  //   apiKey: OPENAI_API_KEY,
+  //   ...(this._configuration?.openAi.endpoint && { baseURL: this._configuration.openAi.endpoint }),
+  // });
   private readonly _fixedRelevances: { [k: string]: number } = {};
 
   _getEnumValue(key: CommentType) {
@@ -182,46 +180,26 @@ export class ContentEvaluatorModule implements Module {
     allComments: AllComments,
     prComments: PrCommentToEvaluate[]
   ): Promise<Relevances> {
-    let commentRelevances: Relevances = {};
-    let prCommentRelevances: Relevances = {};
+    const commentRelevances: Relevances = {};
+    const prCommentRelevances: Relevances = {};
 
     if (comments.length) {
-      const dummyResponse = JSON.stringify(this._generateDummyResponse(comments), null, 2);
-      const maxTokens = this._calculateMaxTokens(dummyResponse);
-
-      const promptForComments = this._generatePromptForComments(specification, comments, allComments);
-      commentRelevances = await this._submitPrompt(promptForComments, maxTokens);
+      comments.forEach((comment) => {
+        commentRelevances[`${comment.id}`] = 0.8;
+      });
     }
 
     if (prComments.length) {
-      const dummyResponse = JSON.stringify(this._generateDummyResponse(prComments), null, 2);
-      const maxTokens = this._calculateMaxTokens(dummyResponse);
-
-      const promptForPrComments = this._generatePromptForPrComments(specification, prComments);
-      prCommentRelevances = await this._submitPrompt(promptForPrComments, maxTokens);
+      prComments.forEach((comment) => {
+        prCommentRelevances[`${comment.id}`] = 0.7;
+      });
     }
 
     return { ...commentRelevances, ...prCommentRelevances };
   }
 
   async _submitPrompt(prompt: string, maxTokens: number): Promise<Relevances> {
-    const response: OpenAI.Chat.ChatCompletion = await this._openAi.chat.completions.create({
-      model: this._configuration?.openAi.model ?? "gpt-4o-2024-08-06",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: prompt,
-        },
-      ],
-      max_tokens: maxTokens,
-      top_p: 1,
-      temperature: 1,
-      frequency_penalty: 0,
-      presence_penalty: 0,
-    });
-
-    const rawResponse = String(response.choices[0].message.content);
+    const rawResponse = String("");
     logger.info(`OpenAI raw response (using max_tokens: ${maxTokens}): ${rawResponse}`);
 
     const jsonResponse = JSON.parse(rawResponse);
