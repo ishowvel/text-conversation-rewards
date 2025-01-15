@@ -14,7 +14,6 @@ import { IssueActivityCache } from "../db/issue-activity-cache";
 const baseApp = createPlugin<PluginSettings, EnvConfig, null, SupportedEvents>(
   async (context) => {
     const { payload, config } = context;
-    context.payload.repository.name = ".ubiquity-os";
     const issue = parseGitHubUrl(payload.issue.html_url);
     const activity = new IssueActivityCache(context, issue, "useCache" in config);
     await activity.init();
@@ -28,7 +27,7 @@ const baseApp = createPlugin<PluginSettings, EnvConfig, null, SupportedEvents>(
     logLevel: (process.env.LOG_LEVEL as LogLevel) ?? "info",
     settingsSchema: pluginSettingsSchema,
     envSchema: envConfigSchema,
-    postCommentOnError: false,
+    postCommentOnError: true,
     bypassSignatureVerification: true,
   }
 );
@@ -38,7 +37,7 @@ const app = {
     if (
       request.method === "POST" &&
       new URL(request.url).pathname === "/" &&
-      request.headers.get("origin") === "http://localhost:4000"
+      request.headers.get("referer")?.includes("http://localhost:4000")
     ) {
       try {
         const originalBody = await request.json();
