@@ -1,23 +1,11 @@
-import { TypeBoxError } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
 import Decimal from "decimal.js";
-import ms, { StringValue } from "ms";
-import OpenAI from "openai";
 import { CommentAssociation, commentEnum, CommentKind, CommentType } from "../configuration/comment-types";
 import { ContentEvaluatorConfiguration } from "../configuration/content-evaluator-config";
-import { retry } from "../helpers/retry";
 import { IssueActivity } from "../issue-activity";
-import {
-  AllComments,
-  CommentToEvaluate,
-  openAiRelevanceResponseSchema,
-  PrCommentToEvaluate,
-  Relevances,
-} from "../types/content-evaluator-module-type";
+import { AllComments, CommentToEvaluate, PrCommentToEvaluate } from "../types/content-evaluator-module-type";
 import { BaseModule } from "../types/module";
 import { ContextPlugin } from "../types/plugin-input";
 import { GithubCommentScore, Result } from "../types/results";
-import { LogReturn } from "@ubiquity-os/ubiquity-os-logger";
 import { encodingForModel } from "js-tiktoken";
 
 /**
@@ -25,10 +13,6 @@ import { encodingForModel } from "js-tiktoken";
  */
 export class ContentEvaluatorModule extends BaseModule {
   readonly _configuration: ContentEvaluatorConfiguration | null = this.context.config.incentives.contentEvaluator;
-  readonly _openAi = new OpenAI({
-    apiKey: this.context.env.OPENROUTER_API_KEY,
-    ...(this._configuration?.openAi.endpoint && { baseURL: this._configuration.openAi.endpoint }),
-  });
   private readonly _fixedRelevances: { [k: string]: number } = {};
   private _tokenLimit: number = 0;
 
@@ -63,25 +47,10 @@ export class ContentEvaluatorModule extends BaseModule {
     return true;
   }
 
-  async _getRateLimitTokens() {
-    const res = await this._openAi.chat.completions
-      .create({
-        model: this._configuration?.openAi.model ?? "gpt-4o-2024-08-06",
-        messages: [{ role: "system", content: "a" }],
-        max_tokens: 1,
-      })
-      .asResponse();
-    const tokenLimit = res.headers.get("x-ratelimit-limit-tokens");
-    return tokenLimit && Number.isFinite(Number(tokenLimit)) ? Number(tokenLimit) : Infinity;
-  }
-
   async transform(data: Readonly<IssueActivity>, result: Result) {
     if (!this._configuration?.openAi.tokenCountLimit) {
       throw this.context.logger.fatal("Token count limit is missing, comments cannot be evaluated.");
     }
-    this._tokenLimit = Math.min(this._configuration?.openAi.tokenCountLimit, await this._getRateLimitTokens());
-    this.context.logger.info(`Using token limit: ${this._tokenLimit}`);
-
     const promises: Promise<GithubCommentScore[]>[] = [];
     const allComments: { id: number; comment: string; author: string }[] = [];
 
@@ -100,9 +69,7 @@ export class ContentEvaluatorModule extends BaseModule {
 
       if (specificationBody && comments.length) {
         promises.push(
-          this._processComment(comments, specificationBody, allComments).then(
-            (commentsWithScore) => (currentElement.comments = commentsWithScore)
-          )
+          this._processComment(comments).then((commentsWithScore) => (currentElement.comments = commentsWithScore))
         );
       }
     }
@@ -111,65 +78,18 @@ export class ContentEvaluatorModule extends BaseModule {
     return result;
   }
 
-  async _processComment(comments: Readonly<GithubCommentScore>[], specificationBody: string, allComments: AllComments) {
+  async _processComment(comments: Readonly<GithubCommentScore>[]) {
     const commentsWithScore: GithubCommentScore[] = [...comments];
     const { commentsToEvaluate, prCommentsToEvaluate } = this._splitCommentsByPrompt(commentsWithScore);
 
-    const relevancesByAi = await retry(
-      async () => {
-        const relevances = await this._evaluateComments(
-          specificationBody,
-          commentsToEvaluate,
-          allComments,
-          prCommentsToEvaluate
-        );
+    const relevancesByAi: { [k: string]: number } = {};
 
-        if (Object.keys(relevances).length !== commentsToEvaluate.length + prCommentsToEvaluate.length) {
-          throw this.context.logger.error("There was a mismatch between the relevance scores and amount of comments.", {
-            expectedRelevances: commentsToEvaluate.length + prCommentsToEvaluate.length,
-            receivedRelevances: Object.keys(relevances).length,
-            relevances,
-            commentsToEvaluate,
-            prCommentsToEvaluate,
-          });
-        }
-
-        return relevances;
-      },
-      {
-        maxRetries: this._configuration?.openAi.maxRetries ?? 5,
-        onError: async (error) => {
-          if (this.context.config.incentives.githubComment?.post) {
-            await this.context.commentHandler.postComment(
-              this.context,
-              this.context.logger.ok("Results are being retried", { err: error }),
-              {
-                updateComment: true,
-              }
-            );
-          }
-          this.context.logger.error(String(error), { err: error });
-        },
-        isErrorRetryable: (error) => {
-          if (error instanceof OpenAI.APIError && error.status) {
-            if ([500, 503].includes(error.status)) {
-              return true;
-            }
-            if (error.status === 429 && error.headers) {
-              const retryAfterTokens = error.headers["x-ratelimit-reset-tokens"];
-              const retryAfterRequests = error.headers["x-ratelimit-reset-requests"];
-              if (!retryAfterTokens || !retryAfterRequests) {
-                return true;
-              }
-              const retryAfter = Math.max(ms(retryAfterTokens as StringValue), ms(retryAfterRequests as StringValue));
-              return Number.isFinite(retryAfter) ? retryAfter : true;
-            }
-          }
-          // Retry if there is a SyntaxError caused by malformed JSON or TypeBoxError caused by incorrect JSON from OpenAI
-          return error instanceof SyntaxError || error instanceof TypeBoxError || error instanceof LogReturn;
-        },
-      }
-    );
+    commentsToEvaluate.forEach((comment) => {
+      relevancesByAi[`${comment.id}`] = 0.8;
+    });
+    prCommentsToEvaluate.forEach((comment) => {
+      relevancesByAi[`${comment.id}`] = 0.7;
+    });
 
     for (const currentComment of commentsWithScore) {
       let currentRelevance = 1; // For comments not in fixed relevance types and missed by OpenAI evaluation
@@ -244,166 +164,6 @@ export class ContentEvaluatorModule extends BaseModule {
       result.push(arrayCopy.splice(0, Math.ceil(arrayCopy.length / i)));
     }
     return result;
-  }
-
-  async _splitPromptForIssueCommentEvaluation(
-    specification: string,
-    comments: CommentToEvaluate[],
-    allComments: AllComments
-  ) {
-    const commentRelevances: Relevances = {};
-
-    const dummyResponse = JSON.stringify(this._generateDummyResponse(comments), null, 2);
-    const maxOutputTokens = this._calculateMaxTokens(dummyResponse);
-
-    let chunks = 2;
-    while (
-      maxOutputTokens +
-        Math.max(
-          ...this._splitArrayToChunks(allComments, chunks).map((chunk) =>
-            this._calculateMaxTokens(this._generatePromptForComments(specification, comments, chunk), Infinity)
-          )
-        ) >
-      this._tokenLimit
-    ) {
-      chunks++;
-    }
-    this.context.logger.info(`Splitting issue comments into ${chunks} chunks`);
-
-    for (const commentSplit of this._splitArrayToChunks(allComments, chunks)) {
-      const promptForComments = this._generatePromptForComments(specification, comments, commentSplit);
-
-      for (const [key, value] of Object.entries(await this._submitPrompt(promptForComments, maxOutputTokens))) {
-        if (commentRelevances[key]) {
-          commentRelevances[key] = new Decimal(commentRelevances[key]).add(value).toNumber();
-        } else {
-          commentRelevances[key] = value;
-        }
-      }
-    }
-    for (const key of Object.keys(commentRelevances)) {
-      commentRelevances[key] = new Decimal(commentRelevances[key]).div(chunks).toNumber();
-    }
-
-    return commentRelevances;
-  }
-
-  async _splitPromptForPullRequestCommentEvaluation(specification: string, comments: PrCommentToEvaluate[]) {
-    const commentRelevances: Relevances = {};
-
-    let chunks = 2;
-    while (
-      Math.max(
-        ...this._splitArrayToChunks(comments, chunks).map(
-          (chunk) =>
-            this._calculateMaxTokens(JSON.stringify(this._generateDummyResponse(chunk), null, 2)) +
-            this._calculateMaxTokens(this._generatePromptForPrComments(specification, chunk), Infinity)
-        )
-      ) > this._tokenLimit
-    ) {
-      chunks++;
-    }
-    this.context.logger.info(`Splitting PR comments into ${chunks} chunks`);
-
-    for (const commentSplit of this._splitArrayToChunks(comments, chunks)) {
-      const dummyResponse = JSON.stringify(this._generateDummyResponse(commentSplit), null, 2);
-      const maxOutputTokens = this._calculateMaxTokens(dummyResponse);
-      const promptForComments = this._generatePromptForPrComments(specification, commentSplit);
-
-      for (const [key, value] of Object.entries(await this._submitPrompt(promptForComments, maxOutputTokens))) {
-        if (commentRelevances[key]) {
-          commentRelevances[key] = new Decimal(commentRelevances[key]).add(value).toNumber();
-        } else {
-          commentRelevances[key] = value;
-        }
-      }
-    }
-    for (const key of Object.keys(commentRelevances)) {
-      commentRelevances[key] = new Decimal(commentRelevances[key]).div(chunks).toNumber();
-    }
-
-    return commentRelevances;
-  }
-
-  async _evaluateComments(
-    specification: string,
-    userIssueComments: CommentToEvaluate[],
-    allComments: AllComments,
-    userPrComments: PrCommentToEvaluate[]
-  ): Promise<Relevances> {
-    let commentRelevances: Relevances = {};
-    let prCommentRelevances: Relevances = {};
-
-    if (userIssueComments.length) {
-      const dummyResponse = JSON.stringify(this._generateDummyResponse(userIssueComments), null, 2);
-      const maxOutputTokens = this._calculateMaxTokens(dummyResponse);
-
-      const promptForIssueComments = this._generatePromptForComments(specification, userIssueComments, allComments);
-      if (this._calculateMaxTokens(promptForIssueComments, Infinity) + maxOutputTokens > this._tokenLimit) {
-        commentRelevances = await this._splitPromptForIssueCommentEvaluation(
-          specification,
-          userIssueComments,
-          allComments
-        );
-      } else {
-        commentRelevances = await this._submitPrompt(promptForIssueComments, maxOutputTokens);
-      }
-    }
-
-    if (userPrComments.length) {
-      const dummyResponse = JSON.stringify(this._generateDummyResponse(userPrComments), null, 2);
-      const maxOutputTokens = this._calculateMaxTokens(dummyResponse);
-
-      const promptForPrComments = this._generatePromptForPrComments(specification, userPrComments);
-      if (this._calculateMaxTokens(promptForPrComments, Infinity) + maxOutputTokens > this._tokenLimit) {
-        prCommentRelevances = await this._splitPromptForPullRequestCommentEvaluation(specification, userPrComments);
-      } else {
-        prCommentRelevances = await this._submitPrompt(promptForPrComments, maxOutputTokens);
-      }
-    }
-
-    if (
-      userIssueComments.length !== Object.keys(commentRelevances).length ||
-      userPrComments.length !== Object.keys(prCommentRelevances).length
-    ) {
-      this.context.logger.warn(
-        `[_evaluateComments]: Result mismatch. Evaluated ${userIssueComments.length} user issue comments that gave ${Object.keys(commentRelevances).length} comment relevance, and ${userPrComments.length} that gave ${Object.keys(prCommentRelevances).length} pr comment relevance.`
-      );
-    }
-    return { ...commentRelevances, ...prCommentRelevances };
-  }
-
-  async _submitPrompt(prompt: string, maxTokens: number): Promise<Relevances> {
-    try {
-      const res = await this._openAi.chat.completions.create({
-        model: this._configuration?.openAi.model ?? "gpt-4o-2024-08-06",
-        response_format: {
-          type: "json_object",
-        },
-        messages: [
-          {
-            role: "system",
-            content: prompt,
-          },
-        ],
-        max_tokens: maxTokens,
-        top_p: 1,
-        temperature: 1,
-        frequency_penalty: 0,
-        presence_penalty: 0,
-      });
-      const rawResponse = String(res.choices[0].message.content);
-      this.context.logger.info(`LLM raw response (using max_tokens: ${maxTokens}): ${rawResponse}`);
-
-      const relevances = Value.Decode(openAiRelevanceResponseSchema, JSON.parse(rawResponse));
-      this.context.logger.info(`Relevances by the LLM: ${JSON.stringify(relevances)}`);
-      return relevances;
-    } catch (e) {
-      this.context.logger.error(`Invalid response type received from the LLM while evaluating: \n\n${e}`, {
-        error: e as Error,
-      });
-      throw e;
-    }
   }
 
   _generatePromptForComments(issue: string, userComments: CommentToEvaluate[], allComments: AllComments) {

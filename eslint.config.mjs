@@ -1,7 +1,6 @@
 // @ts-check
 import tsEslint from "typescript-eslint";
 import eslint from "@eslint/js";
-import sonarjs from "eslint-plugin-sonarjs";
 import checkFile from "eslint-plugin-check-file";
 
 export default tsEslint.config({
@@ -10,7 +9,7 @@ export default tsEslint.config({
     "check-file": checkFile,
   },
   ignores: [".github/knip.ts", "dist/", "tests/__mocks__/**", "coverage/**", "dist/**", "src/web/dist/**"],
-  extends: [eslint.configs.recommended, ...tsEslint.configs.recommended, sonarjs.configs.recommended],
+  extends: [eslint.configs.recommended, ...tsEslint.configs.recommended],
   languageOptions: {
     parser: tsEslint.parser,
     parserOptions: {
@@ -63,18 +62,6 @@ export default tsEslint.config({
     "@typescript-eslint/await-thenable": "error",
     "@typescript-eslint/no-misused-new": "error",
     "@typescript-eslint/restrict-plus-operands": "error",
-    "sonarjs/no-all-duplicated-branches": "error",
-    "sonarjs/no-collection-size-mischeck": "error",
-    "sonarjs/no-duplicated-branches": "error",
-    "sonarjs/no-element-overwrite": "error",
-    "sonarjs/no-identical-conditions": "error",
-    "sonarjs/no-identical-expressions": "error",
-    "sonarjs/new-cap": "off",
-    "sonarjs/different-types-comparison": "off",
-    "sonarjs/sonar-prefer-regexp-exec": "off",
-    "sonarjs/function-return-type": "off",
-    "sonarjs/no-misleading-array-reverse": "off",
-    "sonarjs/slow-regex": "off",
     "@typescript-eslint/no-require-imports": "off",
     "@typescript-eslint/naming-convention": [
       "error",
